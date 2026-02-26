@@ -16,14 +16,14 @@ MIN_WEIGHT=0.001
 def iv_expr(good_pct,bad_pct):
 
     """
-    功能描述: 该函数返回一个Polars表达式，用于计算信息值（IV），基于好样本百分比和坏样本百分比。
+    功能描述: 计算信息价值（IV）的Polars表达式。
     参数:
-    - good_pct (str): 好样本百分比的列名
-    - bad_pct (str): 坏样本百分比的列名
-    返回值: pl.Expr: 计算IV的Polars表达式
-    关键规则: IV = (G_pct - B_pct) * WOE，其中WOE由woe_expr计算；输入百分比列应为正数。
-    示例: iv_expr('G_pct', 'B_pct')
-    实现说明: 调用woe_expr并乘以差值，无额外逻辑。
+    - good_pct (str): 好样本占比列名
+    - bad_pct (str): 坏样本占比列名
+    返回值: Polars表达式对象，用于在DataFrame中计算IV列
+    关键规则: 内部调用woe_expr计算WOE；适用于Polars的lazy或急切计算；不直接处理数据，需在select或with_columns中使用
+    示例: `df.with_columns(iv=iv_expr('G_pct', 'B_pct'))`
+    实现说明: 基于公式IV = (good_pct - bad_pct) * WOE实现。
     """
     return (pl.col(good_pct)-pl.col(bad_pct))*woe_expr(good_pct, bad_pct)
 
@@ -31,14 +31,14 @@ def iv_expr(good_pct,bad_pct):
 def woe_expr(good_pct,bad_pct):
 
     """
-    功能描述: 该函数返回一个Polars表达式，用于计算证据权重（WOE），基于好样本百分比和坏样本百分比。
+    功能描述: 计算优势比（WOE）的Polars表达式，并处理极小值防除零。
     参数:
-    - good_pct (str): 好样本百分比的列名
-    - bad_pct (str): 坏样本百分比的列名
-    返回值: pl.Expr: 计算WOE的Polars表达式
-    关键规则: 百分比被裁剪到MIN_WEIGHT（0.001）以避免除零或log(0)；WOE = log(G_pct / B_pct)。
-    示例: woe_expr('G_pct', 'B_pct')
-    实现说明: 计算好/坏百分比比并取log，使用clip确保最小值。
+    - good_pct (str): 好样本占比列名
+    - bad_pct (str): 坏样本占比列名
+    返回值: Polars表达式对象，用于计算WOE列
+    关键规则: 使用clip将占比限制在MIN_WEIGHT以上（默认0.001），避免log(0)或除零错误；适用于Polars延迟计算
+    示例: `df.with_columns(woe=woe_expr('G_pct', 'B_pct'))`
+    实现说明: WOE = log(good_pct / bad_pct)，有下界保护。
     """
     return (pl.col(good_pct).clip(MIN_WEIGHT, None) / pl.col(bad_pct).clip(MIN_WEIGHT, None)).log()
 
@@ -46,13 +46,13 @@ def woe_expr(good_pct,bad_pct):
 def _woe_table(df):
 
     """
-    功能描述: 为分箱DataFrame添加计算列，包括总权重、百分比、WOE和IV。
+    功能描述: 为分箱基础统计DataFrame添加总权重、占比、WOE和IV列。
     参数:
-    - df (polars.DataFrame): 包含'B_wgt'和'G_wgt'列的分箱数据。
-    返回值: polars.DataFrame: 添加了'Tot_wgt', 'B_pct', 'G_pct', 'Tot_pct', 'WoE', 'IV'列的DataFrame。
-    关键规则: 基于B_wgt和G_wgt计算百分比；使用woe_expr计算WoE；IV = WoE * (G_pct - B_pct)。
-    示例: _woe_table(df)
-    实现说明: 链式调用with_columns添加各列，使用Polars表达式高效计算。
+    - df (polars.DataFrame): 包含至少'B_wgt'和'G_wgt'列的分箱表
+    返回值: 添加了'Tot_wgt', 'B_pct', 'G_pct', 'Tot_pct', 'WoE', 'IV'列的新DataFrame
+    关键规则: 列按顺序添加；依赖全局MIN_WEIGHT和woe_expr函数；输入通常由group_by聚合后得到
+    示例: 输入分箱聚合后的DataFrame，输出完整WOE表
+    实现说明: 链式调用with_columns逐步计算各衍生统计量。
     """
     return df.with_columns(
             Tot_wgt = pl.col('B_wgt') + pl.col('G_wgt'),
@@ -66,14 +66,14 @@ def _woe_table(df):
 def pattern_bin_merge(wgt, pattern):
 
     """
-    功能描述: 根据指定模式合并分箱，基于累积好/坏权重比。
+    功能描述: 根据累积优势比（cumulative odds）趋势和指定模式合并相邻分箱的起始索引。
     参数:
-    - wgt (np.ndarray): 形状(n,2)的数组，第一列为好权重，第二列为坏权重。
-    - pattern (str): 合并模式，支持'A'（上升趋势）、'D'（下降趋势）、'AD'、'DA'。
-    返回值: np.ndarray: 合并后的分箱起始索引数组。
-    关键规则: 模式'A'找最小累积比，'D'找最大；'AD'和'DA'是组合模式；处理除零错误。
-    示例: pattern_bin_merge(wgt, 'A')
-    实现说明: 循环计算累积好/坏比，根据模式用argmin/argmax找合并点，使用np.seterr处理除零警告。
+    - wgt (np.ndarray): n行2列数组，第0列为好权重，第1列为坏权重
+    - pattern (str): 合并模式，'A'表示希望坏占比下降（找cum odds最小点），'D'表示希望坏占比上升（找最大点），'AD'/'DA'为两阶段组合模式
+    返回值: 合并后分箱的起始索引数组（numpy数组）
+    关键规则: 使用numpy计算累积权重比；忽略除零警告（np.seterr）；模式'AD'先按A后按D，'DA'先按D后按A；返回索引对应合并后分箱的第一个原始索引位置
+    示例: `indices = pattern_bin_merge(wgt_array, 'A')`
+    实现说明: 对剩余段计算cum odds，根据模式寻找极值点作为合并边界，循环直至处理完所有行。
     """
     np.seterr(divide="ignore")
     start_idx=0
@@ -106,16 +106,15 @@ def pattern_bin_merge(wgt, pattern):
 
 def _pattern_bin_merge(df_woe, var_nm):
 
-
     """
-    功能描述: 合并正常分箱基于趋势，使用pattern_bin_merge，并保留缺失值分箱。
+    功能描述: 对单个变量的分箱表执行基于趋势的自动合并优化，并选择使总IV最大的模式。
     参数:
-    - df_woe (polars.DataFrame): 分箱表，包含'G_wgt', 'B_wgt', 'is_mv', 'bin'等列。
-    - var_nm (str): 变量名。
-    返回值: polars.DataFrame: 合并后的分箱表，包含更新后的分箱。
-    关键规则: 分离is_mv为真和假的分箱；对正常分箱尝试模式'A'和'D'，选择使总IV最大的模式；重新分组基于区间下界；合并回缺失值分箱。
-    示例: _pattern_bin_merge(df_woe, 'age')
-    实现说明: 提取正常分箱，运行pattern_bin_merge，基于low值cut重新定义bin，concat回MV分箱。
+    - df_woe (polars.DataFrame): 变量分箱表，需含'G_wgt','B_wgt','is_mv','bin'等列
+    - var_nm (str): 变量名，用于输出标记
+    返回值: 合并优化后的分箱表（DataFrame），列结构类似输入但bin可能合并，添加var_nm和bin_idx列
+    关键规则: 仅处理正常分箱（is_mv=False）；尝试模式['A','D']，计算合并后总IV，选择最大者；缺失分箱（is_mv=True）保持不变；重建bin为区间字符串；输出表按grp排序
+    示例: 输入原始分箱表，返回趋势合并后分箱
+    实现说明: 提取权重数组，调用pattern_bin_merge，按合并索引分组聚合统计量，重新分配bin标签，拼接缺失分箱。
     """
     mv_bin = df_woe.filter(pl.col('is_mv'))
     normal_bin = df_woe.filter(~pl.col('is_mv'))
@@ -161,19 +160,19 @@ def bin_table(df_part,
           pattern_merge):
 
     """
-    功能描述: 为多个变量创建分箱表，计算每个分箱的计数和权重，并可选按趋势合并。
+    功能描述: 为数据子集计算多个变量的分箱统计表（含WOE/IV），支持缺失值映射、等频分箱和趋势合并。
     参数:
-    - df_part (polars.DataFrame): 输入数据部分。
-    - x_cols (list of str): 要分箱的变量名列表。
-    - target_col (str): 目标列名（0/1）。
-    - weight_col (str): 权重列名。
-    - num_bins (int): 分箱数。
-    - MV_dict (dict): 缺失值映射，如{缺失值: 'MV标签'}。
-    - pattern_merge (bool): 是否按趋势合并分箱。
-    返回值: polars.DataFrame: 所有变量的分箱表，列包括'var_nm', 'bin_idx', 'B_cnt', 'G_cnt', 'B_wgt', 'G_wgt', 'is_mv', 'bin'等。
-    关键规则: 非负变量使用加权分位数分箱；MV_dict处理特定缺失值；如果pattern_merge为真，调用_pattern_bin_merge合并；分箱基于左闭区间。
-    示例: bin_table(df, ['x1','x2'], 'target', 'weight', 10, {}, True)
-    实现说明: 对每个变量，分离MV和正常数据，正常数据用cut分箱，应用_woe_table，可选合并。
+    - df_part (polars.DataFrame): 输入数据子集
+    - x_cols (list[str]): 需分箱的变量列表
+    - target_col (str): 目标变量列名（取值0/1）
+    - weight_col (str): 样本权重列名
+    - num_bins (int): 分箱数，用于等频切分
+    - MV_dict (dict): 缺失值到分箱标签的映射，例如{np.nan: 'MV00', -999: 'MV99'}
+    - pattern_merge (bool): 是否按趋势合并分箱
+    返回值: 合并所有变量的分箱表（DataFrame），包含列：bin, B_cnt, G_cnt, B_wgt, G_wgt, is_mv, WoE, IV, var_nm, bin_idx等
+    关键规则: 仅对x_col大于0的观测使用pl_quantile_wtd计算等频断点；缺失值按MV_dict指定分箱；若pattern_merge=True，则调用_pattern_bin_merge进一步合并；每个变量独立处理，最终concat
+    示例: `bin_table(df, ['age','income'], 'bad', weight_col='w', num_bins=10, MV_dict={}, pattern_merge=True)`
+    实现说明: 为每个变量并行创建两个lazy frame（MV和正常），分别处理分箱和聚合，合并后pipe _woe_table，最后可选趋势合并。
     """
     probs = np.arange(1/num_bins, 1, 1/num_bins)
     # x_col非负变量
@@ -234,33 +233,31 @@ def bin_table(df_part,
 
 def iv(good_pct,bad_pct):
 
-
     """
-    功能描述: 计算信息值（IV）的数值版本，基于好样本百分比和坏样本百分比。
+    功能描述: 计算信息价值（IV），支持标量或数组输入。
     参数:
-    - good_pct (float or np.ndarray): 好样本百分比。
-    - bad_pct (float or np.ndarray): 坏样本百分比。
-    返回值: float or np.ndarray: 计算的IV值。
-    关键规则: 使用MIN_WEIGHT裁剪输入以避免log(0)或除零；IV = (good_pct - bad_pct) * log(good_pct / bad_pct)。
-    示例: iv(0.3, 0.1)
-    实现说明: 直接应用公式，使用np.maximum确保最小值。
+    - good_pct (float or np.ndarray): 好样本占比
+    - bad_pct (float or np.ndarray): 坏样本占比
+    返回值: IV值，形状与输入相同
+    关键规则: 使用np.maximum将输入限制在MIN_WEIGHT（0.001）以上，防止log(0)或除零；公式IV = (good - bad) * log(good / bad)
+    示例: `iv(0.6, 0.2)` 或 `iv(np.array([0.3,0.5]), np.array([0.1,0.2]))`
+    实现说明: 数值安全计算，避免下溢。
     """
     res=(good_pct-bad_pct)*(np.log(np.maximum(good_pct, MIN_WEIGHT)/np.maximum(bad_pct, MIN_WEIGHT)))
     return res
 
 
 def woe(good_pct,bad_pct):
-   
 
     """
-    功能描述: 计算证据权重（WOE）的数值版本，基于好样本百分比和坏样本百分比。
+    功能描述: 计算优势比（WOE），支持标量或数组输入。
     参数:
-    - good_pct (float or np.ndarray): 好样本百分比。
-    - bad_pct (float or np.ndarray): 坏样本百分比。
-    返回值: float or np.ndarray: 计算的WOE值。
-    关键规则: 使用MIN_WEIGHT裁剪输入；WOE = log(good_pct / bad_pct)。
-    示例: woe(0.3, 0.1)
-    实现说明: 计算比并取log，使用np.maximum。
+    - good_pct (float or np.ndarray): 好样本占比
+    - bad_pct (float or np.ndarray): 坏样本占比
+    返回值: WOE值，形状与输入相同
+    关键规则: 使用np.maximum限制最小值MIN_WEIGHT；WOE = log(good / bad)
+    示例: `woe(0.6, 0.2)`
+    实现说明: 对数变换比值，有下界保护。
     """
     woe_val=(np.log(np.maximum(good_pct, MIN_WEIGHT)/np.maximum(bad_pct, MIN_WEIGHT)))
     return woe_val
@@ -275,19 +272,19 @@ def summary_iv(df,
           MV_dict=None):
     
     """
-    功能描述: 计算多个变量的IV摘要，可选分段处理，返回详细分箱表和IV汇总。
+    功能描述: 批量计算多个变量的IV值及其详细分箱信息，支持按分段字段分组处理。
     参数:
-    - df (polars.DataFrame): 输入数据。
-    - x_cols (list of str): 变量列表。
-    - target_col (str): 目标列名（0/1）。
-    - weight_col (str, optional): 权重列名，默认生成均匀权重。
-    - seg_cols_ls (list of list of str, optional): 分段列列表，每个元素是分段列的子列表，用于分组计算。
-    - num_bins (int): 分箱数，默认10。
-    - MV_dict (dict, optional): 缺失值映射。
-    返回值: tuple of (polars.DataFrame, polars.DataFrame): 第一个是详细分箱表（st_woe），第二个是IV汇总表（st_iv）。
-    关键规则: 如果weight_col为None，生成uuid权重列；如果seg_cols_ls为None，创建单分组；目标列必须为0/1；当seg_cols为空时，调用calc_woe函数（未定义，可能存在错误），否则调用bin_table；调整列顺序并排序。
-    示例: summary_iv(df, ['x1','x2'], 'target', num_bins=5)
-    实现说明: 遍历分段，对每个分段调用bin_table，然后group_by汇总IV；使用adj_colorder调整列顺序。注意calc_woe未定义，需确认。
+    - df (polars.DataFrame): 源数据
+    - x_cols (list[str]): 需计算IV的变量列表
+    - target_col (str): 目标列（0/1）
+    - weight_col (str, optional): 权重列，默认None则添加均匀权重列
+    - seg_cols_ls (list[list[str]], optional): 分段字段组合列表，每个内列表指定一个分组方式；默认None则整体计算
+    - num_bins (int): 分箱数，默认10
+    - MV_dict (dict): 缺失值映射，默认空字典
+    返回值: (st_woe, st_iv) 元组，st_woe为所有分段所有变量的分箱明细表，st_iv为各变量IV汇总表
+    关键规则: 若weight_col为None，生成UUID列作为权重；若seg_cols_ls为None，创建虚拟分组列；每个分段组合独立调用bin_table（pattern_merge=True）；最终合并所有结果，按all_seg_cols + ['var_nm']排序；若使用虚拟分组则自动丢弃该列。注意：当seg_cols为空列表时，调用未定义的calc_woe函数，可能为错误，待确认。
+    示例: `woe_tbl, iv_tbl = summary_iv(df, num_vars, 'bad', weight_col='w', seg_cols_ls=[['region']], num_bins=10)`
+    实现说明: 遍历seg_cols_ls，对每个分段组合调用bin_table，拼接明细，按变量分组求和IV，调整列顺序并排序。
     """
     if MV_dict is None:
         MV_dict = dict()
@@ -350,17 +347,17 @@ def summary_iv_distribution(iv_summary,
                    save_path=None):
     
     """
-    功能描述: 基于IV摘要创建分布表，按IV范围分组，计算各机构分类的计数和百分比，可输出Excel。
+    功能描述: 基于IV汇总表分析IV值分布，统计各机构分类在不同IV区间的变量数量及占比。
     参数:
-    - iv_summary (polars.DataFrame): IV汇总表，必须包含'IV'列。
-    - org_class_col (str): 机构分类列名。
-    - var_name_col (str): 变量名列名。
-    - theme_col (str): 主题列名。
-    - save_path (str, optional): Excel文件保存路径。
-    返回值: tuple of (polars.DataFrame, polars.DataFrame): 第一个是计数输出（iv_summary_cnt_output），第二个是百分比输出（iv_summary_pct_output）。
-    关键规则: IV范围使用预定义breaks；先按theme_col、org_class_col、var_name_col分组取IV均值，然后按IV范围分组；数据透视和取消透视重塑；如果save_path提供，写入Excel。
-    示例: summary_iv_distribution(iv_df, 'org', 'var', 'theme', 'output.xlsx')
-    实现说明: 使用cut将IV分箱，group_by聚合，pivot/unpivot转换格式，write_tables_to_excel保存。
+    - iv_summary (polars.DataFrame): IV汇总表，需包含IV列及指定的主题、机构、变量名列
+    - org_class_col (str): 机构分类列名
+    - var_name_col (str): 变量名列名
+    - theme_col (str): 主题列名
+    - save_path (str, optional): 保存结果Excel的路径，默认None不保存
+    返回值: (cnt_tbl, pct_tbl) 两个透视表，分别为变量计数和占比，机构分类为行，IV区间为列
+    关键规则: IV区间固定为[0,0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.5]，左闭右开；先按(theme, org_class, var_name)求IV均值，再分区间；百分比起源于区间内变量数除以该机构在主题下的总变量数
+    示例: `cnt_tbl, pct_tbl = summary_iv_distribution(iv_df, 'org_type','var_name','theme', save_path='output.xlsx')`
+    实现说明: 计算每个变量的平均IV，cut分区间，分组计数并透视，生成机构在IV区间的变量分布。
     """
     breaks = [0,0.05,0.1,0.15,0.2,0.25,0.3,0.35,0.4,0.5]
     iv_summary = iv_summary.with_columns(IV_range = pl.col('IV').cut(breaks, left_closed=True))
@@ -406,18 +403,18 @@ def summary_iv_top_distribution(res_iv,
                       save_path=None):
 
     """
-    功能描述: 计算顶部变量IV分布，基于分位数阈值，筛选每个机构分类中IV最高的变量。
+    功能描述: 评估每个机构分类中IV值位于指定顶部百分位的变量数量、占比及其最低IV阈值。
     参数:
-    - res_iv (polars.DataFrame): IV汇总表，必须包含'IV'列。
-    - top_pcts (list of float): 顶部百分比列表，如[0.1, 0.2]。
-    - org_class_col (str): 机构分类列名。
-    - var_name_col (str): 变量名列名。
-    - theme_col (str): 主题列名。
-    - save_path (str, optional): Excel文件保存路径。
-    返回值: dict: 键为'topX%'（X为百分比整数），值为polars.DataFrame，包含计数、百分比、IV阈值等。
-    关键规则: 对每个top_pct，按org_class_col分组计算IV分位数阈值，筛选IV大于等于阈值的变量，然后按theme_col分组计数和计算百分比；结果按org_class_col和theme_col排序。
-    示例: summary_iv_top_distribution(iv_df, [0.1], 'org', 'var', 'theme')
-    实现说明: 循环top_pcts，使用quantile over分组，过滤，group_by聚合，最后可写入Excel。
+    - res_iv (polars.DataFrame): IV汇总表
+    - top_pcts (list[float]): 顶部百分比列表，如[0.2,0.1]表示前20%和前10%
+    - org_class_col (str): 机构分类列名
+    - var_name_col (str): 变量名列名
+    - theme_col (str): 主题列名
+    - save_path (str, optional): 保存结果Excel路径，默认None
+    返回值: dict，键为'topX%'，值为对应统计表，包含列：org_class_col, theme_col, cnt, pct, iv_threshold
+    关键规则: 对每个top_pct，按机构分别计算IV的(1-pct)分位数作为阈值；筛选IV>=阈值的变量；统计每个(机构,主题)的变量数及占比（占该机构总变量数）；输出按机构和变量数降序排列
+    示例: `result = summary_iv_top_distribution(iv_df, [0.2,0.5], 'org','var','theme')`
+    实现说明: 遍历top_pcts，使用窗口函数quantile计算阈值，过滤后按机构主题聚合，计算占比和最低IV。
     """
     res = dict()
     for pct in top_pcts:  

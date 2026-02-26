@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import ast
 import json
 import re
@@ -523,7 +524,7 @@ def run_on_file(
     - 只更新顶层函数与类方法（跳过 __dunder__）
     - docstring 足够则保留，不足则补全
     - 写回不做备份
-    - Markdown 输出到同目录，文件名 `<目标文件夹名>_doc.md`
+    - Markdown 输出到同目录，文件名 `<目标文件名stem>_doc.md`
 
     示例:
     - `run_on_file(Path("x.py"))`
@@ -607,23 +608,58 @@ def run_on_file(
         )
 
     md_text = build_markdown(file_summary=file_summary, rows=rows)
-    md_path = target_path.parent / f"{target_path.parent.name}_doc.md"
+    md_path = target_path.with_name(f"{target_path.stem}_doc.md")
     md_path.write_text(md_text, encoding="utf-8")
 
 
-def main() -> None:
-    raw = input("请输入待解析的 .py 文件路径: ").strip().strip('"')
-    if not raw:
-        raise SystemExit("empty path")
+def _normalize_cli_path(raw: str) -> Path:
+    return Path(raw.strip().strip('"'))
 
-    target_path = Path(raw)
-    if not target_path.exists():
-        raise SystemExit(f"file not found: {target_path}")
-    if target_path.suffix.lower() != ".py":
-        raise SystemExit(f"not a .py file: {target_path}")
 
-    run_on_file(target_path,model='stepfun/step-3.5-flash:free')#'z-ai/glm-4.5-air:free')
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="code_explainer.py",
+        description="补全/补齐 .py 中函数/方法 docstring，并生成每个文件对应的 *_doc.md 报告。",
+    )
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        help="待解析的 .py 文件路径列表（不传则进入交互输入模式）",
+    )
+    parser.add_argument(
+        "--model",
+        default="stepfun/step-3.5-flash:free",
+        help="OpenAI/OpenRouter 模型名（默认: stepfun/step-3.5-flash:free）",
+    )
+    args = parser.parse_args(argv)
+
+    raw_paths: list[str] = list(args.paths)
+    if not raw_paths:
+        raw = input("请输入待解析的 .py 文件路径: ").strip()
+        if not raw:
+            raise SystemExit("empty path")
+        raw_paths = [raw]
+
+    had_error = False
+    for raw_path in raw_paths:
+        target_path = _normalize_cli_path(raw_path)
+        if not target_path.exists():
+            had_error = True
+            print(f"[ERROR] file not found: {target_path}")
+            continue
+        if target_path.suffix.lower() != ".py":
+            had_error = True
+            print(f"[ERROR] not a .py file: {target_path}")
+            continue
+
+        try:
+            run_on_file(target_path, model=args.model)
+        except Exception as exc:  # pragma: no cover
+            had_error = True
+            print(f"[ERROR] failed on {target_path}: {exc}")
+
+    return 1 if had_error else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

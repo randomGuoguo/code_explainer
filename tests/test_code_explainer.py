@@ -168,4 +168,4 @@ def test_run_on_file_writes_md_and_updates_py(tmp_path):
     run_on_file(py_path, llm=fake_llm)
 
     assert "功能描述" in py_path.read_text(encoding="utf-8")
-    assert (target_dir / "proj_doc.md").exists()
+    assert (target_dir / "t_doc.md").exists()

@@ -1,6 +1,6 @@
 # code_explainer
 
-一个简单的 Python 脚本：输入目标 `.py` 文件路径，自动补全/补齐函数与类方法的 docstring（OpenAI API），并在同目录生成 `<目标文件夹名>_doc.md`（文件概述 + 函数概要表）。
+一个简单的 Python 脚本：输入（或通过命令行传入）目标 `.py` 文件路径，自动补全/补齐函数与类方法的 docstring（OpenAI API），并在同目录为每个文件生成 `<目标文件名stem>_doc.md`（文件概述 + 函数概要表）。
 
 ## Quickstart
 
@@ -17,8 +17,14 @@ python .\code_explainer.py
 
 按提示输入目标 `.py` 路径即可。
 
+多文件：
+```powershell
+python .\code_explainer.py .\a.py .\b.py
+# 或（PowerShell 会自动展开）
+python .\code_explainer.py *.py
+```
+
 ## 输出
 
 - 原地修改目标 `.py`：仅插入/替换函数体开头的 docstring（不改逻辑代码）
-- 同目录生成：`<目标文件夹名>_doc.md`
-
+- 同目录生成（每个 `.py` 一个）：`<目标文件名stem>_doc.md`（如 `a.py -> a_doc.md`）
