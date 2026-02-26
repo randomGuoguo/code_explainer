@@ -12,35 +12,12 @@ def balance_badrate(df,
                     default_badrate_info=0.05,
                     adjusted_weight_name='weight_adj'):
     """
-    功能描述:
-    根据目标坏账率调整样本权重，使数据集的坏账率符合指定值。
-    参数:
-    df: polars DataFrame，包含目标列和可选权重列。
-    target_col: str，目标列名，应为二分类标签（0或1）。
-    weight_col: str, optional, 权重列名，默认为None（权重为1）。
-    badrate_info: float or pl.DataFrame, 目标坏账率或包含分组和坏账率的DataFrame，默认为0.05。
-    group_cols: list, optional, 分组列名列表，用于分组计算，默认为None。
-    default_badrate_info: float, 当badrate_info为DataFrame且缺失坏账率时的默认值，默认为0.05。
-    adjusted_weight_name: str, 调整后的权重列名，默认为'weight_adj'。
-    返回值:
-    pl.DataFrame，包含调整后的权重列。
-    关键规则:
-    目标列必须是二分类（0或1）。
-    如果badrate_info是DataFrame，必须包含'badrate'列，且group_cols指定分组列。
-    调整因子计算：adj_factor = (1 - raw_badrate) / raw_badrate * (adj_badrate / (1 - adj_badrate))。
-    应用调整因子：当目标=1时，新权重 = adj_factor * 原始权重；否则保留原始权重。
-    示例:
-    ```python
-    import polars as pl
-    df = pl.DataFrame({
-        "target": [1, 0, 1, 0, 1],
-        "weight": [1, 2, 1, 2, 1]
-    })
-    # 调整坏账率到0.2
-    df_balanced = balance_badrate(df, target_col="target", badrate_info=0.2)
-    ```
-    实现说明:
-    基于调整因子计算权重，使调整后的坏账率符合目标值。处理分组和缺失值。
+    功能描述: 调整DataFrame中样本权重，使调整后bad rate（目标列=1的比例）匹配指定值。支持全局或分组调整，可自定义初始权重。
+    参数: df: Polars DataFrame; target_col: 目标列名（需为0/1二分类）; weight_col: 可选初始权重列，默认无（权重为1）; badrate_info: 调整目标bad rate，可为浮点数或含'badrate'列的DataFrame（其非'badrate'列作为分组列，group_cols参数忽略）; group_cols: 分组列列表（仅当badrate_info为数字时有效）; default_badrate_info: 分组badrate缺失时的默认值; adjusted_weight_name: 输出调整权重列名，默认'weight_adj'。
+    返回值: 添加调整后权重列的DataFrame。
+    关键规则: 仅计算target为0/1的行；badrate_info为DataFrame时需含'badrate'列且分组列与df一致；分组重复时保留首行并警告；调整因子 = (1-raw_badrate)/raw_badrate * (adj_badrate/(1-adj_badrate))；仅target=1时应用调整。
+    示例: 全局：balance_badrate(df, 'y', badrate_info=0.1)；分组：badrate_df = pl.DataFrame({'g':['A','B'], 'badrate':[0.2,0.1]}); balance_badrate(df, 'y', badrate_info=badrate_df)（若badrate_df含分组列则无需group_cols）。
+    实现说明: 计算原始bad rate，据badrate_info得调整值，推导调整因子，按target=1应用权重乘法。
     """
     if weight_col is None:
         weight = pl.lit(1)
@@ -113,32 +90,12 @@ def balance_weight(df,
                    group_cols=None,
                    adjusted_weight_name='weight_adj'):
     """
-    功能描述:
-    调整样本权重以实现总权重平衡，可以全局或按组调整。
-    参数:
-    df: polars DataFrame，包含权重列或默认权重1。
-    weight_col: str, optional, 权重列名，默认为None（权重为1）。
-    weight_info: int or pl.DataFrame, 目标总权重或包含分组和总权重的DataFrame，默认为10000。
-    group_cols: list, optional, 分组列名列表，默认为None。
-    adjusted_weight_name: str, 调整后的权重列名，默认为'weight_adj'。
-    返回值:
-    pl.DataFrame，包含调整后的权重列。
-    关键规则:
-    如果weight_info是DataFrame，必须包含'total_wgt'列，且group_cols指定分组列。
-    调整权重：新权重 = 原始权重 * (目标总权重 / 当前总权重)。
-    按组调整时，确保组内总权重等于目标值。
-    示例:
-    ```python
-    import polars as pl
-    df = pl.DataFrame({
-        "group": ["A", "A", "B", "B"],
-        "weight": [1, 1, 2, 2]
-    })
-    # 调整总权重到10000
-    df_balanced = balance_weight(df, weight_info=10000)
-    ```
-    实现说明:
-    通过归一化权重到目标总值，实现样本平衡。处理分组和缺失值。
+    功能描述: 调整DataFrame中样本权重，使调整后总权重匹配指定值。支持全局或分组调整，可自定义初始权重。
+    参数: df: Polars DataFrame; weight_col: 可选初始权重列，默认无（权重为1）; weight_info: 目标总权重，可为浮点数或含'total_wgt'列的DataFrame（其非'total_wgt'列作为分组列，group_cols参数忽略）; group_cols: 分组列列表（仅当weight_info为数字时有效）; adjusted_weight_name: 输出调整权重列名，默认'weight_adj'。
+    返回值: 添加调整后权重列的DataFrame。
+    关键规则: weight_info为DataFrame时需含'total_wgt'列且分组列与df一致；调整权重 = 原权重 * (目标总权重 / 组内原始总权重)；分组缺失组可能导致null值并警告；adjusted_weight_name已存在时覆盖并警告。
+    示例: 全局：balance_weight(df, weight_info=10000)；分组：weight_df = pl.DataFrame({'g':['A','B'], 'total_wgt':[5000,5000]}); balance_weight(df, weight_info=weight_df)（若weight_df含分组列则无需group_cols）。
+    实现说明: 从weight_info获取目标权重，计算组内原始总权重，求调整比例，应用乘法调整。
     """
     if weight_col is None:
         weight = pl.lit(1)

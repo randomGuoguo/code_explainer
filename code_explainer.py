@@ -324,7 +324,7 @@ def build_prompt_payload(*, source_text: str, target_qualnames: list[str]) -> st
         "2) JSON 结构：\n"
         '   {"file_summary": string, "updates": [{"qualname": string, "docstring": string, "summary": string}, ...]}\n'
         "3) `updates` 只包含我提供的 qualname（不要输出其它函数）。\n"
-        "4) `docstring` 字段是不包含三引号的纯文本，按以下 6 段标题组织（中文为主，术语保留英文）：\n"
+        "4) `docstring` 字段是不包含三引号的纯文本，按以下 6 段标题组织（中文为主，术语保留英文；不同参数、返回值需要换行显示）：\n"
         "   - 功能描述:\n"
         "   - 参数:\n"
         "   - 返回值:\n"
@@ -622,7 +622,7 @@ def main() -> None:
     if target_path.suffix.lower() != ".py":
         raise SystemExit(f"not a .py file: {target_path}")
 
-    run_on_file(target_path,model='z-ai/glm-4.5-air:free')
+    run_on_file(target_path,model='stepfun/step-3.5-flash:free')#'z-ai/glm-4.5-air:free')
 
 
 if __name__ == "__main__":
