@@ -127,6 +127,16 @@ def _format_docstring_block(docstring_text: str, indent: str) -> list[str]:
     return block_lines
 
 
+def _get_docstring_expr(first_stmt: ast.stmt) -> ast.stmt | None:
+    if (
+        isinstance(first_stmt, ast.Expr)
+        and isinstance(first_stmt.value, ast.Constant)
+        and isinstance(first_stmt.value.value, str)
+    ):
+        return first_stmt
+    return None
+
+
 def _iter_qualname_function_nodes(
     tree: ast.Module,
 ) -> list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
@@ -191,13 +201,7 @@ def apply_docstring_updates(*, source_text: str, updates: dict[str, str]) -> str
         indent = _indent_of_line(lines[first_stmt.lineno - 1])
         new_block = _format_docstring_block(updates[qualname], indent)
 
-        doc_expr: ast.stmt | None = None
-        if (
-            isinstance(first_stmt, ast.Expr)
-            and isinstance(first_stmt.value, ast.Constant)
-            and isinstance(first_stmt.value.value, str)
-        ):
-            doc_expr = first_stmt
+        doc_expr = _get_docstring_expr(first_stmt)
 
         if doc_expr is None:
             insert_at = first_stmt.lineno - 1
@@ -213,6 +217,57 @@ def apply_docstring_updates(*, source_text: str, updates: dict[str, str]) -> str
             lines[start_line:start_line] = new_block
         else:
             lines[start_line : end_line + 1] = new_block
+
+    return "".join(lines)
+
+
+def remove_docstrings(*, source_text: str, qualnames: set[str] | None = None) -> str:
+    """
+    功能描述:
+    - 删除源码中目标函数/方法的 docstring，支持删除全部或按 qualname 精确删除。
+
+    参数:
+    - source_text (str): 原始 Python 源码文本
+    - qualnames (set[str] | None, default=None): 需要删除的 qualname 集合；None 表示删除全部目标
+
+    返回值:
+    - (str): 删除 docstring 后的源码文本
+
+    关键规则:
+    - 仅删除函数体首条字符串表达式形式的 docstring
+    - 仅处理顶层函数与类方法
+    - 跳过 __dunder__
+
+    示例:
+    - `remove_docstrings(source_text=src, qualnames={"foo", "Cls.bar"})`
+
+    实现说明(<=100字):
+    - 复用 AST 遍历与行号切片，收集 docstring 行范围后倒序删除。
+    """
+
+    lines = source_text.splitlines(keepends=True)
+    tree = ast.parse(source_text)
+
+    target_names = None if qualnames is None else set(qualnames)
+    ops: list[tuple[int, int]] = []
+    for qualname, function_node in _iter_qualname_function_nodes(tree):
+        if target_names is not None and qualname not in target_names:
+            continue
+        if _is_dunder(function_node.name):
+            continue
+        if not function_node.body:
+            continue
+
+        doc_expr = _get_docstring_expr(function_node.body[0])
+        if doc_expr is None:
+            continue
+
+        start_line = doc_expr.lineno - 1
+        end_line = (doc_expr.end_lineno or doc_expr.lineno) - 1
+        ops.append((start_line, end_line))
+
+    for start_line, end_line in sorted(ops, key=lambda x: x[0], reverse=True):
+        lines[start_line : end_line + 1] = []
 
     return "".join(lines)
 
@@ -393,7 +448,7 @@ def call_openai_for_updates(*, prompt_text: str, model: str = "gpt-4.1") -> dict
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("Missing dependency: openai. Install with `pip install openai`.") from exc
 
-    client = OpenAI()
+    client = ''
     try:  # pragma: no cover
         response = client.responses.create(
             model=model,
@@ -502,11 +557,69 @@ def _extract_returns_from_docstring(docstring_text: str | None) -> str:
     return ""
 
 
+def resolve_md_output_path(target_path: Path, md_out_dir: Path | None = None) -> Path:
+    """
+    功能描述:
+    - 统一解析目标 `.py` 文件对应的 Markdown 输出路径。
+
+    参数:
+    - target_path (Path): 目标 `.py` 文件路径
+    - md_out_dir (Path | None, default=None): 自定义 Markdown 输出目录
+
+    返回值:
+    - (Path): Markdown 输出文件路径
+
+    关键规则:
+    - 默认输出到目标文件同目录
+    - 文件名始终为 `<stem>_doc.md`
+    - 自定义目录不存在时自动创建
+
+    示例:
+    - `resolve_md_output_path(Path("a.py"), Path("docs/out"))`
+
+    实现说明(<=100字):
+    - 先确定目录，再统一拼接 `<stem>_doc.md`，并确保目录存在。
+    """
+
+    out_dir = md_out_dir or target_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir / f"{target_path.stem}_doc.md"
+
+
+def _build_markdown_rows_from_source(source_text: str) -> list[dict[str, str]]:
+    tree = ast.parse(source_text)
+    rows: list[dict[str, str]] = []
+    for qualname, function_node in _iter_qualname_function_nodes(tree):
+        if _is_dunder(function_node.name):
+            continue
+
+        params = _format_params(function_node)
+        returns = ast.unparse(function_node.returns) if function_node.returns is not None else ""
+        existing_clean = ast.get_docstring(function_node, clean=True)
+        if not returns:
+            returns = _extract_returns_from_docstring(existing_clean)
+
+        rows.append(
+            {
+                "qualname": qualname,
+                "params": params,
+                "returns": returns,
+                "summary": _first_nonempty_line(existing_clean or ""),
+            }
+        )
+
+    return rows
+
+
 def run_on_file(
     target_path: Path,
     *,
     llm: Callable[[str, list[str]], dict] | None = None,
     model: str = "gpt-4.1",
+    mode: str = "generate",
+    remove_qualnames: set[str] | None = None,
+    emit_md_when_removing: bool = False,
+    md_out_dir: Path | None = None,
 ) -> None:
     """
     功能描述:
@@ -516,25 +629,49 @@ def run_on_file(
     - target_path (Path): 目标 `.py` 文件路径
     - llm (Callable, default=None): 注入的 LLM 函数（用于测试）；签名 (source_text, qualnames)->dict
     - model (str): OpenAI 模型名（llm=None 时生效）
+    - mode (str, default="generate"): `generate` 或 `remove`
+    - remove_qualnames (set[str] | None, default=None): 删除模式下要删除的 qualname；None 表示删除全部
+    - emit_md_when_removing (bool, default=False): 删除模式下是否仍生成 Markdown
+    - md_out_dir (Path | None, default=None): Markdown 输出目录
 
     返回值:
     - (None): 原地写文件与生成 Markdown
 
     关键规则:
     - 只更新顶层函数与类方法（跳过 __dunder__）
-    - docstring 足够则保留，不足则补全
+    - `generate` 模式：docstring 足够则保留，不足则补全
+    - `remove` 模式：删除全部或指定目标的 docstring
     - 写回不做备份
-    - Markdown 输出到同目录，文件名 `<目标文件名stem>_doc.md`
+    - Markdown 文件名固定为 `<目标文件名stem>_doc.md`
 
     示例:
-    - `run_on_file(Path("x.py"))`
+    - `run_on_file(Path("x.py"), md_out_dir=Path("docs/out"))`
 
     实现说明(<=100字):
-    - 先计算需更新的 qualname 列表，再调用 LLM 取回 updates 并应用；最后用 AST 生成函数表并写 md。
+    - 先按模式更新源码；需要 Markdown 时再统一解析输出路径并写报告。
     """
 
     source_text, has_bom = _read_text_preserve_utf8_bom(target_path)
     targets = scan_targets(source_text)
+    available_qualnames = {target.qualname for target in targets}
+
+    if mode == "remove":
+        if remove_qualnames is not None:
+            missing_qualnames = sorted(remove_qualnames - available_qualnames)
+            for qualname in missing_qualnames:
+                print(f"[WARN] qualname not found in {target_path}: {qualname}")
+
+        updated_source = remove_docstrings(source_text=source_text, qualnames=remove_qualnames)
+        _write_text_preserve_utf8_bom(path=target_path, text=updated_source, has_bom=has_bom)
+
+        if not emit_md_when_removing:
+            return
+
+        rows = _build_markdown_rows_from_source(updated_source)
+        md_text = build_markdown(file_summary="", rows=rows)
+        md_path = resolve_md_output_path(target_path, md_out_dir)
+        md_path.write_text(md_text, encoding="utf-8")
+        return
 
     qualnames_to_update: list[str] = []
     for target in targets:
@@ -608,7 +745,7 @@ def run_on_file(
         )
 
     md_text = build_markdown(file_summary=file_summary, rows=rows)
-    md_path = target_path.with_name(f"{target_path.stem}_doc.md")
+    md_path = resolve_md_output_path(target_path, md_out_dir)
     md_path.write_text(md_text, encoding="utf-8")
 
 
@@ -619,7 +756,7 @@ def _normalize_cli_path(raw: str) -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="code_explainer.py",
-        description="补全/补齐 .py 中函数/方法 docstring，并生成每个文件对应的 *_doc.md 报告。",
+        description="补全或删除 .py 中函数/方法 docstring，并按需生成每个文件对应的 *_doc.md 报告。",
     )
     parser.add_argument(
         "paths",
@@ -631,6 +768,27 @@ def main(argv: list[str] | None = None) -> int:
         default="stepfun/step-3.5-flash:free",
         help="OpenAI/OpenRouter 模型名（默认: stepfun/step-3.5-flash:free）",
     )
+    parser.add_argument(
+        "--md-out-dir",
+        type=_normalize_cli_path,
+        help="Markdown 输出目录（默认输出到目标 .py 同目录）",
+    )
+    remove_group = parser.add_mutually_exclusive_group()
+    remove_group.add_argument(
+        "--remove-docstrings-all",
+        action="store_true",
+        help="删除目标 .py 中所有可扫描函数/方法的 docstring",
+    )
+    remove_group.add_argument(
+        "--remove-docstrings",
+        nargs="+",
+        help="删除指定 qualname 的 docstring，如 foo Cls.bar",
+    )
+    parser.add_argument(
+        "--emit-md-when-removing",
+        action="store_true",
+        help="删除 docstring 时仍生成 Markdown 报告",
+    )
     args = parser.parse_args(argv)
 
     raw_paths: list[str] = list(args.paths)
@@ -641,6 +799,14 @@ def main(argv: list[str] | None = None) -> int:
         raw_paths = [raw]
 
     had_error = False
+    mode = "generate"
+    remove_qualnames: set[str] | None = None
+    if args.remove_docstrings_all:
+        mode = "remove"
+    elif args.remove_docstrings:
+        mode = "remove"
+        remove_qualnames = set(args.remove_docstrings)
+
     for raw_path in raw_paths:
         target_path = _normalize_cli_path(raw_path)
         if not target_path.exists():
@@ -653,7 +819,14 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         try:
-            run_on_file(target_path, model=args.model)
+            run_on_file(
+                target_path,
+                model=args.model,
+                mode=mode,
+                remove_qualnames=remove_qualnames,
+                emit_md_when_removing=args.emit_md_when_removing,
+                md_out_dir=args.md_out_dir,
+            )
         except Exception as exc:  # pragma: no cover
             had_error = True
             print(f"[ERROR] failed on {target_path}: {exc}")

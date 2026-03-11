@@ -109,6 +109,73 @@ def test_apply_docstring_updates_updates_class_method():
     assert ast.get_docstring(method) == "功能描述:\n- method"
 
 
+def test_remove_docstrings_removes_all_targets():
+    import ast
+    import textwrap
+
+    from code_explainer import remove_docstrings
+
+    src = textwrap.dedent(
+        '''
+        def f(x):
+            "old"
+            return x
+
+        class C:
+            def m(self, y):
+                "method"
+                return y
+        '''
+    ).lstrip()
+
+    updated = remove_docstrings(source_text=src)
+    tree = ast.parse(updated)
+    assert ast.get_docstring(tree.body[0]) is None
+    assert ast.get_docstring(tree.body[1].body[0]) is None
+
+
+def test_remove_docstrings_only_removes_selected_qualnames():
+    import ast
+    import textwrap
+
+    from code_explainer import remove_docstrings
+
+    src = textwrap.dedent(
+        '''
+        def f(x):
+            "old"
+            return x
+
+        class C:
+            def m(self, y):
+                "method"
+                return y
+        '''
+    ).lstrip()
+
+    updated = remove_docstrings(source_text=src, qualnames={"C.m"})
+    tree = ast.parse(updated)
+    assert ast.get_docstring(tree.body[0]) == "old"
+    assert ast.get_docstring(tree.body[1].body[0]) is None
+
+
+def test_resolve_md_output_path_supports_default_and_custom_dir(tmp_path):
+    from pathlib import Path
+
+    from code_explainer import resolve_md_output_path
+
+    target_path = Path(tmp_path) / "proj" / "a.py"
+    target_path.parent.mkdir(parents=True)
+    target_path.write_text("def a():\n    return 1\n", encoding="utf-8")
+
+    default_md_path = resolve_md_output_path(target_path)
+    custom_md_path = resolve_md_output_path(target_path, Path(tmp_path) / "docs" / "out")
+
+    assert default_md_path == target_path.parent / "a_doc.md"
+    assert custom_md_path == Path(tmp_path) / "docs" / "out" / "a_doc.md"
+    assert custom_md_path.parent.exists()
+
+
 def test_build_markdown_contains_sections_and_table():
     from code_explainer import build_markdown
 
@@ -169,3 +236,59 @@ def test_run_on_file_writes_md_and_updates_py(tmp_path):
 
     assert "功能描述" in py_path.read_text(encoding="utf-8")
     assert (target_dir / "t_doc.md").exists()
+
+
+def test_run_on_file_supports_custom_md_out_dir(tmp_path):
+    from pathlib import Path
+
+    from code_explainer import run_on_file
+
+    target_dir = Path(tmp_path) / "proj"
+    md_dir = Path(tmp_path) / "docs" / "out"
+    target_dir.mkdir()
+    py_path = target_dir / "t.py"
+    py_path.write_text("def a(x):\n    return x\n", encoding="utf-8")
+
+    def fake_llm(_source_text: str, _qualnames: list[str]):
+        return {
+            "file_summary": "sum",
+            "updates": [{"qualname": "a", "docstring": "功能描述:\n- demo", "summary": "do a"}],
+        }
+
+    run_on_file(py_path, llm=fake_llm, md_out_dir=md_dir)
+
+    assert (md_dir / "t_doc.md").exists()
+    assert not (target_dir / "t_doc.md").exists()
+
+
+def test_run_on_file_remove_mode_skips_md_by_default(tmp_path):
+    from pathlib import Path
+
+    from code_explainer import run_on_file
+
+    target_dir = Path(tmp_path) / "proj"
+    target_dir.mkdir()
+    py_path = target_dir / "t.py"
+    py_path.write_text('def a(x):\n    "old"\n    return x\n', encoding="utf-8")
+
+    run_on_file(py_path, mode="remove")
+
+    assert '"old"' not in py_path.read_text(encoding="utf-8")
+    assert not (target_dir / "t_doc.md").exists()
+
+
+def test_run_on_file_remove_mode_can_emit_md(tmp_path):
+    from pathlib import Path
+
+    from code_explainer import run_on_file
+
+    target_dir = Path(tmp_path) / "proj"
+    md_dir = Path(tmp_path) / "docs"
+    target_dir.mkdir()
+    py_path = target_dir / "t.py"
+    py_path.write_text('def a(x) -> int:\n    "old"\n    return x\n', encoding="utf-8")
+
+    run_on_file(py_path, mode="remove", emit_md_when_removing=True, md_out_dir=md_dir)
+
+    assert '"old"' not in py_path.read_text(encoding="utf-8")
+    assert (md_dir / "t_doc.md").exists()
